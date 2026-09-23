@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.models import HangRail, RailPlacement, Store, WorkOrder
 from app.schemas.schemas import (
+    HangPreviewOut,
+    HangPreviewRequest,
     HangRequest,
     OccupancyOut,
     OccupancySeg,
@@ -66,43 +68,93 @@ def occupancy(rail_id: int, db: Session = Depends(get_db)):
     return OccupancyOut(rail_id=rail.id, label=rail.label, length_cm=rail.length_cm, segments=segs)
 
 
-@api_router.post("/hang", response_model=OrderOut)
-def hang(body: HangRequest, db: Session = Depends(get_db)):
-    order = db.get(WorkOrder, body.order_id)
+def _hangable_order(db: Session, order_id: int) -> WorkOrder:
+    order = db.get(WorkOrder, order_id)
     if not order:
         raise HTTPException(404, "工单不存在")
     if order.status not in ("ready", "overdue"):
         raise HTTPException(400, "工单状态不可上杆")
+    return order
+
+
+def _store_rail(db: Session, rail_id: int, store_id: int) -> HangRail:
+    rail = db.get(HangRail, rail_id)
+    if not rail or rail.store_id != store_id:
+        raise HTTPException(404, "无可用挂杆")
+    return rail
+
+
+def _occupied_segments(db: Session, rail_id: int) -> list[Segment]:
+    active = db.scalars(
+        select(RailPlacement).where(RailPlacement.rail_id == rail_id, RailPlacement.active == 1)
+    ).all()
+    return [Segment(p.start_cm, p.end_cm) for p in active]
+
+
+@api_router.post("/hang/preview", response_model=HangPreviewOut)
+def hang_preview(body: HangPreviewRequest, db: Session = Depends(get_db)):
+    """Dry-run first-fit on one rail. Read-only: no order status change, no placement rows."""
+    order = _hangable_order(db, body.order_id)
+    rail = _store_rail(db, body.rail_id, order.store_id)
+    place = first_fit(rail.length_cm, _occupied_segments(db, rail.id), order.length_cm)
+    if place is None:
+        return HangPreviewOut(
+            order_id=order.id,
+            rail_id=rail.id,
+            rail_label=rail.label,
+            length_cm=rail.length_cm,
+            fits=False,
+        )
+    return HangPreviewOut(
+        order_id=order.id,
+        rail_id=rail.id,
+        rail_label=rail.label,
+        length_cm=rail.length_cm,
+        fits=True,
+        start_cm=place.start_cm,
+        end_cm=place.end_cm,
+    )
+
+
+@api_router.post("/hang", response_model=OrderOut)
+def hang(body: HangRequest, db: Session = Depends(get_db)):
+    order = _hangable_order(db, body.order_id)
+    if body.rail_id is not None:
+        # 指定杆：只在该杆试一次，放不下直接失败，不写任何占位
+        rail = _store_rail(db, body.rail_id, order.store_id)
+        place = first_fit(rail.length_cm, _occupied_segments(db, rail.id), order.length_cm)
+        if place is None:
+            raise HTTPException(409, "挂杆空间不足")
+        return _commit_hang(db, order, rail.id, place)
+
     rail_q = select(HangRail).where(HangRail.store_id == order.store_id)
-    if body.rail_id:
-        rail_q = rail_q.where(HangRail.id == body.rail_id)
     rails = db.scalars(rail_q.order_by(HangRail.id)).all()
     if not rails:
         raise HTTPException(404, "无可用挂杆")
 
     for rail in rails:
-        active = db.scalars(
-            select(RailPlacement).where(RailPlacement.rail_id == rail.id, RailPlacement.active == 1)
-        ).all()
-        occupied = [Segment(p.start_cm, p.end_cm) for p in active]
-        place = first_fit(rail.length_cm, occupied, order.length_cm)
+        place = first_fit(rail.length_cm, _occupied_segments(db, rail.id), order.length_cm)
         if place is None:
             continue
-        db.add(
-            RailPlacement(
-                rail_id=rail.id,
-                order_id=order.id,
-                start_cm=place.start_cm,
-                end_cm=place.end_cm,
-            )
-        )
-        order.status = "hung"
-        order.hung_at = datetime.utcnow()
-        db.commit()
-        db.refresh(order)
-        return order
+        return _commit_hang(db, order, rail.id, place)
 
     raise HTTPException(409, "挂杆空间不足")
+
+
+def _commit_hang(db: Session, order: WorkOrder, rail_id: int, place) -> WorkOrder:
+    db.add(
+        RailPlacement(
+            rail_id=rail_id,
+            order_id=order.id,
+            start_cm=place.start_cm,
+            end_cm=place.end_cm,
+        )
+    )
+    order.status = "hung"
+    order.hung_at = datetime.utcnow()
+    db.commit()
+    db.refresh(order)
+    return order
 
 
 @api_router.post("/pickup", response_model=OrderOut)

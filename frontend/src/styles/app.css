@@ -278,3 +278,11 @@ button {
   display: flex; align-items: center; justify-content: center;
   padding: 0 4px; overflow: hidden; white-space: nowrap;
 }
+
+/* —— Orders: rail picker + dry-run preview —— */
+.hangcell { display: flex; flex-direction: column; gap: .3rem; min-width: 220px; }
+.hangcell-row { display: flex; gap: .4rem; align-items: center; }
+.hangcell-row select { padding: .35rem .5rem; }
+.hangcell-row button { padding: .35rem .6rem; white-space: nowrap; }
+.hangcell-row button:disabled { opacity: .55; cursor: not-allowed; }
+.hangcell-hint { font-size: .78rem; }
