@@ -7,15 +7,17 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.models import HangRail, RailPlacement, Store, WorkOrder
 from app.schemas.schemas import (
+    HangPreviewOut,
     HangRequest,
     OccupancyOut,
     OccupancySeg,
     OrderOut,
     PickupRequest,
+    PreviewRequest,
     RailOut,
     StoreOut,
 )
-from app.services.rail_engine import Segment, first_fit
+from app.services.rail_engine import Placement, Segment, first_fit
 
 api_router = APIRouter()
 
@@ -66,26 +68,64 @@ def occupancy(rail_id: int, db: Session = Depends(get_db)):
     return OccupancyOut(rail_id=rail.id, label=rail.label, length_cm=rail.length_cm, segments=segs)
 
 
-@api_router.post("/hang", response_model=OrderOut)
-def hang(body: HangRequest, db: Session = Depends(get_db)):
-    order = db.get(WorkOrder, body.order_id)
+def _get_hangable_order(db: Session, order_id: int) -> WorkOrder:
+    order = db.get(WorkOrder, order_id)
     if not order:
         raise HTTPException(404, "工单不存在")
     if order.status not in ("ready", "overdue"):
         raise HTTPException(400, "工单状态不可上杆")
+    return order
+
+
+def _candidate_rails(db: Session, order: WorkOrder, rail_id: int | None) -> list[HangRail]:
     rail_q = select(HangRail).where(HangRail.store_id == order.store_id)
-    if body.rail_id:
-        rail_q = rail_q.where(HangRail.id == body.rail_id)
-    rails = db.scalars(rail_q.order_by(HangRail.id)).all()
+    if rail_id is not None:
+        rail_q = rail_q.where(HangRail.id == rail_id)
+    return list(db.scalars(rail_q.order_by(HangRail.id)).all())
+
+
+def _try_place(db: Session, rail: HangRail, order: WorkOrder) -> Placement | None:
+    """Pure read: compute the first-fit landing segment for the order on this rail."""
+    active = db.scalars(
+        select(RailPlacement).where(RailPlacement.rail_id == rail.id, RailPlacement.active == 1)
+    ).all()
+    occupied = [Segment(p.start_cm, p.end_cm) for p in active]
+    return first_fit(rail.length_cm, occupied, order.length_cm)
+
+
+@api_router.post("/hang/preview", response_model=HangPreviewOut)
+def hang_preview(body: PreviewRequest, db: Session = Depends(get_db)):
+    """Dry-run a placement on the specified rail. Never writes status or placements."""
+    order = _get_hangable_order(db, body.order_id)
+    candidates = _candidate_rails(db, order, body.rail_id)
+    if not candidates:
+        raise HTTPException(404, "无可用挂杆")
+    rail = candidates[0]
+    place = _try_place(db, rail, order)
+    out = HangPreviewOut(
+        order_id=order.id,
+        ticket_code=order.ticket_code,
+        rail_id=rail.id,
+        rail_label=rail.label,
+        rail_length_cm=rail.length_cm,
+        garment_cm=order.length_cm,
+        fits=place is not None,
+    )
+    if place is not None:
+        out.start_cm = place.start_cm
+        out.end_cm = place.end_cm
+    return out
+
+
+@api_router.post("/hang", response_model=OrderOut)
+def hang(body: HangRequest, db: Session = Depends(get_db)):
+    order = _get_hangable_order(db, body.order_id)
+    rails = _candidate_rails(db, order, body.rail_id)
     if not rails:
         raise HTTPException(404, "无可用挂杆")
 
     for rail in rails:
-        active = db.scalars(
-            select(RailPlacement).where(RailPlacement.rail_id == rail.id, RailPlacement.active == 1)
-        ).all()
-        occupied = [Segment(p.start_cm, p.end_cm) for p in active]
-        place = first_fit(rail.length_cm, occupied, order.length_cm)
+        place = _try_place(db, rail, order)
         if place is None:
             continue
         db.add(

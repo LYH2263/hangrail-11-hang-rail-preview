@@ -278,3 +278,10 @@ button {
   display: flex; align-items: center; justify-content: center;
   padding: 0 4px; overflow: hidden; white-space: nowrap;
 }
+
+.hang-cell { display: flex; flex-direction: column; gap: .3rem; min-width: 220px; }
+.hang-controls { display: flex; gap: .4rem; align-items: center; }
+.hang-controls select { padding: .35rem .5rem; min-width: 118px; }
+.hang-controls button { padding: .35rem .6rem; white-space: nowrap; }
+.hang-controls button:disabled { background: #4a3828; color: #8a7a6a; cursor: not-allowed; }
+.hang-preview { font-size: .78rem; margin: 0; }

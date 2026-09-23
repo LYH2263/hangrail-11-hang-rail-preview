@@ -33,6 +33,23 @@ class HangRequest(BaseModel):
     rail_id: int | None = None
 
 
+class PreviewRequest(BaseModel):
+    order_id: int
+    rail_id: int
+
+
+class HangPreviewOut(BaseModel):
+    order_id: int
+    ticket_code: str
+    rail_id: int
+    rail_label: str
+    rail_length_cm: float
+    garment_cm: float
+    fits: bool
+    start_cm: float | None = None
+    end_cm: float | None = None
+
+
 class PickupRequest(BaseModel):
     ticket_code: str
 
